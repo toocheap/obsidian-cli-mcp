@@ -14,6 +14,11 @@ from fs_server import (
     ResponseFormat,
 )
 
+try:
+    import frontmatter
+except ImportError:
+    frontmatter = None
+
 
 @pytest.fixture
 def mock_vault(tmp_path: Path) -> Path:
@@ -55,6 +60,7 @@ class TestFrontmatterRead:
     """Tests for obsidian_fs_read with frontmatter."""
 
     @pytest.mark.asyncio
+    @pytest.mark.skipif(frontmatter is None, reason="python-frontmatter not installed")
     async def test_read_frontmatter(self, mock_vault_path: MagicMock) -> None:
         """Should parse aliases, tags, and custom fields."""
         result_json = await obsidian_fs_read(ReadNoteInput(path="Full.md"))
@@ -96,6 +102,7 @@ class TestFrontmatterSearch:
     """Tests for search inclusion of frontmatter."""
 
     @pytest.mark.asyncio
+    @pytest.mark.skipif(frontmatter is None, reason="python-frontmatter not installed")
     async def test_search_returns_frontmatter(self, mock_vault_path: MagicMock) -> None:
         """Search results should include frontmatter in metadata."""
         params = SearchNotesInput(query="Content", response_format=ResponseFormat.JSON)

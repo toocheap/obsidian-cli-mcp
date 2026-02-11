@@ -92,6 +92,7 @@ FS版を使用することで、Obsidian アプリを常駐させずにすべて
 - エラーメッセージは具体的なアクションを示唆するものにする
 - ファイルI/Oは `OSError` を捕捉するために try/except でラップする
 - `Path.is_relative_to()` を使用してパストラバーサルを防止する
+- 環境変数はモジュールレベルではなく、関数内 (`_vault_path` 等) で動的に取得し、テスト容易性を確保する
 
 ## CLIコマンドのパターン
 
@@ -104,13 +105,43 @@ obsidian [vault=<n>] <command> [param=value ...] [flags]
 - フラグ: ブールスイッチ (単語のみ、例: `silent`, `todo`)
 - 複数行: 改行には `\n` を使用
 
-## テスト方法
+# テストと品質保証 (Testing & QA)
 
+テストは `pytest` と `pytest-asyncio` を使用します。
+
+### テスト方針 (Test Policy)
+1. **リアルな検証 (No Mocks)**: ファイルシステム操作はモックに頼らず、一時ディレクトリ (`tmp_path`) を使用して実際の挙動を検証します。
+2. **環境の隔離 (Isolation)**: テストケース間で環境変数やグローバルな状態が漏洩しないよう、`monkeypatch` 等を使用して各テストで厳格に隔離・リセットします。
+3. **環境適応 (Adaptability)**: オプションの依存関係が欠けている環境でも、テストスイート全体が停止しないよう適切にスキップまたはハンドリングします。
+
+### テスト実行方法
 ```bash
-# 構文チェック
+# 必要な依存関係をインストール (ローカル環境)
+pip install pytest pytest-asyncio python-frontmatter
+
+# テスト実行
+export PYTHONPATH=$PYTHONPATH:.
+pytest tests/
+```
+
+# 開発ワークフロー
+
+1. **計画 (Plan)**: `task.md` および `implementation_plan.md` を更新し、実装内容を定義します。
+   - **チーム協議**: 実装者、品質管理（QA）、計画担当で実装方針を議論します（実装計画が必要な場合）。
+   - **リーダー判断**: リーダーがハイレベルな観点から、その実装が目的に合致しているか、一時しのぎの修正になっていないかを判断し、方針を決定します。
+2. **実装 (Implement)**: コードを作成・修正します。`fs_server.py` の変更時は動的な設定読み込みを意識します。
+3. **テスト (Test)**: 統合テストを実行し、リグレッションがないか確認します。
+4. **検証 (Verify)**: 手動検証またはレポート (`report.md`) の更新を行い、品質を担保します。
+
+## 構文チェック
+```bash
 python -m py_compile server.py
 python -m py_compile fs_server.py
+```
 
+## サーバー実行
+
+```bash
 # CLI サーバーの実行 (Obsidian がローカルで起動している必要あり)
 python server.py
 

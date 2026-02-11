@@ -38,13 +38,13 @@ from pydantic import BaseModel, Field, ConfigDict
 # Constants
 # ---------------------------------------------------------------------------
 
-VAULT_PATH = os.environ.get("OBSIDIAN_VAULT_PATH", "")
+# VAULT_PATH is now read dynamically in _vault_path()
 DEFAULT_DAILY_NOTE_FORMAT = "%Y-%m-%d"
 DEFAULT_DAILY_NOTE_FOLDER = ""
 MAX_SEARCH_RESULTS = 100
 DEFAULT_SEARCH_LIMIT = 20
 WIKILINK_PATTERN = re.compile(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]")
-TAG_PATTERN = re.compile(r"(?<=\s)#([a-zA-Z0-9_\-/]+)", re.MULTILINE)
+TAG_PATTERN = re.compile(r"(?:^|\s)#([a-zA-Z0-9_\-/]+)", re.MULTILINE)
 FRONTMATTER_TAG_PATTERN = re.compile(r"^tags:\s*\[?(.*?)\]?\s*$", re.MULTILINE)
 TASK_PATTERN = re.compile(r"^(\s*)-\s\[(.)\]\s+(.*)$")
 
@@ -84,12 +84,13 @@ class ResponseFormat(str, Enum):
 @lru_cache(maxsize=1)
 def _vault_path() -> Path:
     """Return the validated vault path. Cached after first call."""
-    if not VAULT_PATH:
+    vault_path_str = os.environ.get("OBSIDIAN_VAULT_PATH", "")
+    if not vault_path_str:
         raise ValueError(
             "OBSIDIAN_VAULT_PATH environment variable is not set. "
             "Please set it to your Obsidian vault directory."
         )
-    p = Path(VAULT_PATH).expanduser().resolve()
+    p = Path(vault_path_str).expanduser().resolve()
     if not p.is_dir():
         raise ValueError(f"Vault path does not exist or is not a directory: {p}")
     return p
@@ -168,6 +169,25 @@ def _extract_wikilinks(content: str) -> List[str]:
     return sorted(set(WIKILINK_PATTERN.findall(content)))
 
 
+def _resolve_note_path(vault: Path, relative_path: str) -> Path:
+    """Resolve a note path, adding .md extension if missing.
+    
+    Args:
+        vault: Vault root path.
+        relative_path: Relative path to the note.
+        
+    Returns:
+        Path: Resolved absolute path.
+        
+    Raises:
+        ValueError: If path traversal is detected.
+    """
+    note_path = _safe_resolve(vault, relative_path)
+    if not note_path.suffix:
+        note_path = note_path.with_suffix(".md")
+    return note_path
+
+
 def _note_metadata(vault: Path, note_path: Path, include_frontmatter: bool = False) -> Dict[str, Any]:
     """Build metadata dict for a note."""
     rel = note_path.relative_to(vault)
@@ -181,13 +201,47 @@ def _note_metadata(vault: Path, note_path: Path, include_frontmatter: bool = Fal
         # Note: st_ctime is creation time on macOS, but metadata change time on Linux
         "created": datetime.fromtimestamp(stat.st_ctime, tz=timezone.utc).isoformat(),
     }
-    if include_frontmatter and frontmatter:
-        try:
-            post = frontmatter.load(note_path)
-            meta["frontmatter"] = post.metadata
-        except Exception:
+    if include_frontmatter:
+        if frontmatter:
+            try:
+                post = frontmatter.load(note_path)
+                meta["frontmatter"] = post.metadata
+            except Exception:
+                meta["frontmatter"] = {}
+        else:
             meta["frontmatter"] = {}
     return meta
+
+
+def _apply_append(original: str, content: str) -> str:
+    """Append content to the end of the note."""
+    return original + "\n" + content
+
+
+def _apply_prepend(original: str, content: str) -> str:
+    """Prepend content, respecting frontmatter."""
+    if original.startswith("---"):
+        end_idx = original.find("\n---", 3)
+        if end_idx != -1:
+            insert_pos = end_idx + 4
+            prefix = original[:insert_pos]
+            suffix = original[insert_pos:]
+            
+            new_content = prefix + "\n" + content
+            if not suffix.startswith("\n"):
+                new_content += "\n"
+            new_content += suffix
+            return new_content
+    return content + "\n" + original
+
+
+def _apply_replace(original: str, content: str, find: Optional[str] = None) -> str:
+    """Replace content, optionally finding specific text."""
+    if find is None:
+        return content
+    if find not in original:
+        raise ValueError(f"Text to replace not found")
+    return original.replace(find, content, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +375,23 @@ class MoveNoteInput(BaseModel):
     overwrite: bool = Field(default=False, description="Overwrite if destination exists")
 
 
+class PropertyInput(BaseModel):
+    """Input for managing frontmatter properties."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    path: str = Field(..., description="Path to the note", min_length=1)
+    operation: str = Field(..., description="Operation: 'get', 'set', 'remove', 'list'", pattern=r"^(get|set|remove|list)$")
+    key: Optional[str] = Field(default=None, description="Property key (required for get/set/remove)")
+    value: Optional[Any] = Field(default=None, description="Property value (required for set)")
+
+
+class OpenNoteInput(BaseModel):
+    """Input for opening a note in the default app."""
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    path: str = Field(..., description="Path to the note or file to open", min_length=1)
+
+
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
@@ -387,9 +458,7 @@ async def obsidian_fs_read(params: ReadNoteInput) -> str:
         str: JSON with note metadata, content, tags, and wikilinks.
     """
     vault = _vault_path()
-    note_path = _safe_resolve(vault, params.path)
-    if not note_path.suffix:
-        note_path = note_path.with_suffix(".md")
+    note_path = _resolve_note_path(vault, params.path)
     if not note_path.is_file():
         return f"Error: Note not found at '{params.path}'."
     try:
@@ -405,6 +474,8 @@ async def obsidian_fs_read(params: ReadNoteInput) -> str:
             meta["frontmatter"] = post.metadata
         except Exception:
             meta["frontmatter"] = {}
+    else:
+        meta["frontmatter"] = {}
             
     meta["tags"] = _extract_tags(content)
     meta["wikilinks"] = _extract_wikilinks(content)
@@ -424,9 +495,7 @@ async def obsidian_fs_create(params: CreateNoteInput) -> str:
         str: JSON with creation status.
     """
     vault = _vault_path()
-    note_path = _safe_resolve(vault, params.path)
-    if not note_path.suffix:
-        note_path = note_path.with_suffix(".md")
+    note_path = _resolve_note_path(vault, params.path)
     if note_path.exists() and not params.overwrite:
         return f"Error: Note already exists at '{params.path}'. Set overwrite=true to replace."
     try:
@@ -452,29 +521,26 @@ async def obsidian_fs_edit(params: EditNoteInput) -> str:
         str: JSON with edit status.
     """
     vault = _vault_path()
-    note_path = _safe_resolve(vault, params.path)
-    if not note_path.suffix:
-        note_path = note_path.with_suffix(".md")
+    note_path = _resolve_note_path(vault, params.path)
     if not note_path.is_file():
         return f"Error: Note not found at '{params.path}'."
     try:
         original = note_path.read_text(encoding="utf-8")
     except (UnicodeDecodeError, OSError) as e:
         return f"Error: Could not read note: {e}"
-    if params.operation == "append":
-        new_content = original + "\n" + params.content
-    elif params.operation == "prepend":
-        new_content = params.content + "\n" + original
-    elif params.operation == "replace":
-        if params.find is None:
-            new_content = params.content
+        
+    try:
+        if params.operation == "append":
+            new_content = _apply_append(original, params.content)
+        elif params.operation == "prepend":
+            new_content = _apply_prepend(original, params.content)
+        elif params.operation == "replace":
+            new_content = _apply_replace(original, params.content, str(params.find) if params.find else None)
         else:
-            find_text = str(params.find)
-            if find_text not in original:
-                return f"Error: Text to replace not found in '{params.path}'."
-            new_content = original.replace(find_text, params.content, 1)
-    else:
-        return f"Error: Unknown operation '{params.operation}'."
+            return f"Error: Unknown operation '{params.operation}'."
+    except ValueError as e:
+        return f"Error: {e} in '{params.path}'."
+
     try:
         note_path.write_text(new_content, encoding="utf-8")
     except OSError as e:
@@ -495,9 +561,7 @@ async def obsidian_fs_delete(params: DeleteNoteInput) -> str:
     if not params.confirm:
         return "Error: Deletion not confirmed. Set confirm=true to proceed."
     vault = _vault_path()
-    note_path = _safe_resolve(vault, params.path)
-    if not note_path.suffix:
-        note_path = note_path.with_suffix(".md")
+    note_path = _resolve_note_path(vault, params.path)
     if not note_path.is_file():
         return f"Error: Note not found at '{params.path}'."
     rel = str(note_path.relative_to(vault))
@@ -715,10 +779,7 @@ async def obsidian_fs_task_toggle(params: FsTaskToggleInput) -> str:
         str: Status message.
     """
     vault = _vault_path()
-    note_path = _safe_resolve(vault, params.path)
-    
-    if not note_path.suffix:
-        note_path = note_path.with_suffix(".md")
+    note_path = _resolve_note_path(vault, params.path)
     
     if not note_path.is_file():
         return f"Error: Note not found at '{params.path}'."
@@ -799,11 +860,109 @@ async def obsidian_fs_move(params: MoveNoteInput) -> str:
     except OSError as e:
         return f"Error: Could not move: {e}"
 
+
     return json.dumps({
         "status": "moved", 
         "from": str(src_path.relative_to(vault)), 
         "to": str(dest_path.relative_to(vault))
     }, indent=2)
+
+
+@mcp.tool(name="obsidian_fs_property")
+async def obsidian_fs_property(params: PropertyInput) -> str:
+    """Manage frontmatter properties (get, set, remove, list).
+
+    Args:
+        params (PropertyInput): Path, operation, key, value.
+
+    Returns:
+        str: JSON status or value.
+    """
+    if not frontmatter:
+        return "Error: python-frontmatter not installed. Please install it to use property tools."
+
+    vault = _vault_path()
+    note_path = _resolve_note_path(vault, params.path)
+    if not note_path.is_file():
+        return f"Error: Note not found at '{params.path}'."
+
+    try:
+        post = frontmatter.load(note_path)
+    except Exception as e:
+        return f"Error: Could not parse frontmatter: {e}"
+
+    if params.operation == "list":
+        return json.dumps(post.metadata, indent=2, ensure_ascii=False)
+
+    if params.operation == "get":
+        if not params.key:
+            return "Error: 'key' is required for 'get' operation."
+        val = post.metadata.get(params.key)
+        return json.dumps({params.key: val}, indent=2, ensure_ascii=False)
+
+    if params.operation == "remove":
+        if not params.key:
+            return "Error: 'key' is required for 'remove' operation."
+        if params.key in post.metadata:
+            del post.metadata[params.key]
+            try:
+                # python-frontmatter write is a bit implicit, prefer dumping and writing
+                # But frontmatter.dumps(post) works
+                new_content = frontmatter.dumps(post)
+                note_path.write_text(new_content, encoding="utf-8")
+                return json.dumps({"status": "removed", "key": params.key}, indent=2)
+            except OSError as e:
+                return f"Error: Could not save note: {e}"
+        return f"Error: Property '{params.key}' not found."
+
+    if params.operation == "set":
+        if not params.key:
+            return "Error: 'key' is required for 'set' operation."
+        if params.value is None:
+             return "Error: 'value' is required for 'set' operation."
+        
+        # Simple type inference/conversion could go here if passing strings for everything
+        # But MCP passes JSON types, so lists/bools/numbers should be preserved.
+        post.metadata[params.key] = params.value
+        try:
+            new_content = frontmatter.dumps(post)
+            note_path.write_text(new_content, encoding="utf-8")
+            return json.dumps({"status": "set", "key": params.key, "value": params.value}, indent=2)
+        except OSError as e:
+            return f"Error: Could not save note: {e}"
+
+    return f"Error: Unknown operation '{params.operation}'."
+
+
+@mcp.tool(name="obsidian_fs_open")
+async def obsidian_fs_open(params: OpenNoteInput) -> str:
+    """Open a note in the default system application (Obsidian).
+
+    Args:
+        params (OpenNoteInput): Path to open.
+
+    Returns:
+        str: Status message.
+    """
+    import subprocess
+    vault = _vault_path()
+    note_path = _resolve_note_path(vault, params.path)
+    
+    if not note_path.exists():
+         return f"Error: Path not found: '{params.path}'"
+
+    try:
+        if sys.platform == "darwin":
+            # Use -- to stop option parsing for the file path
+            subprocess.run(["open", "--", str(note_path)], check=True)
+        elif sys.platform == "win32":
+            os.startfile(str(note_path))
+        else: # linux
+            subprocess.run(["xdg-open", str(note_path)], check=True)
+        return f"Opened '{note_path.name}'"
+    except Exception as e:
+        return f"Error opening file: {e}"
+
 
 
 # ---------------------------------------------------------------------------
@@ -849,6 +1008,16 @@ async def alias_obsidian_tags_list(params: GetTagsInput) -> str:
 async def alias_obsidian_backlinks(params: GetBacklinksInput) -> str:
     """Alias for obsidian_fs_get_backlinks."""
     return await obsidian_fs_get_backlinks(params)
+
+@mcp.tool(name="obsidian_property")
+async def alias_obsidian_property(params: PropertyInput) -> str:
+    """Alias for obsidian_fs_property."""
+    return await obsidian_fs_property(params)
+
+@mcp.tool(name="obsidian_open")
+async def alias_obsidian_open(params: OpenNoteInput) -> str:
+    """Alias for obsidian_fs_open."""
+    return await obsidian_fs_open(params)
 
 @mcp.tool(name="obsidian_tasks_list")
 async def alias_obsidian_tasks_list(params: FsTasksListInput) -> str:
