@@ -1,0 +1,27 @@
+[project]
+name = "obsidian-cli-mcp"
+version = "0.1.0"
+description = "MCP server for Obsidian CLI integration"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp[cli]>=1.0.0",
+    "pydantic>=2.0.0",
+    "python-frontmatter>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[project.scripts]
+obsidian-mcp = "server:main"
+obsidian-fs-mcp = "fs_server:main"
+
+[tool.setuptools]
+py-modules = ["server", "fs_server", "cli"]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
