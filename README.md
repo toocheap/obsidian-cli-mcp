@@ -22,6 +22,16 @@ Obsidian を Claude Desktop / Claude Code から操作するための MCP サー
 ## セットアップ
 
 ```bash
+# リポジトリから直接インストール
+pip install git+https://github.com/toocheap/obsidian-cli-mcp.git
+
+# または uv を使用
+uv tool install git+https://github.com/toocheap/obsidian-cli-mcp.git
+```
+
+## 開発用セットアップ
+
+```bash
 cd ~/src/obsidian-cli-mcp
 uv sync
 ```
@@ -82,10 +92,10 @@ Claude Desktop を再起動。
 
 ```bash
 # CLI版
-claude mcp add obsidian -- uv run --directory ~/src/obsidian-cli-mcp server.py
+claude mcp add obsidian -- uvx --from git+https://github.com/toocheap/obsidian-cli-mcp.git obsidian-mcp
 
 # FS版
-claude mcp add obsidian_fs -e OBSIDIAN_VAULT_PATH=/Users/too/Obsidian/too -- uv run --directory ~/src/obsidian-cli-mcp fs_server.py
+claude mcp add obsidian_fs -e OBSIDIAN_VAULT_PATH=/Users/too/Obsidian/too -- uvx --from git+https://github.com/toocheap/obsidian-cli-mcp.git obsidian-fs-mcp
 ```
 
 ## CLI版ツール一覧
